@@ -1,0 +1,7 @@
+services:
+  warp-socks:
+    build:
+      context: .
+      args:
+        WIREPROXY_VERSION: v1.1.3
+    image: local/wireproxy-wgcf:1.0

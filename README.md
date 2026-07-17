@@ -17,8 +17,20 @@ runs WireGuard in userspace.
 
 ```bash
 cp .env.example .env
-docker compose up -d --build
+docker compose up -d
 docker compose logs -f
+```
+
+The default compose file uses this Docker Hub image:
+
+```text
+pengfeiyin56/wireproxy-wgcf-docker:latest
+```
+
+To build locally instead:
+
+```bash
+docker compose -f compose.yaml -f compose.build.yaml up -d --build
 ```
 
 The first run accepts Cloudflare WARP terms, registers a device, and creates
