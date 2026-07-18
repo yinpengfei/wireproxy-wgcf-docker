@@ -1,0 +1,59 @@
+diff --git a/tun/netstack/tun.go b/tun/netstack/tun.go
+index a7aec9e..fe0227e 100644
+--- a/tun/netstack/tun.go
++++ b/tun/netstack/tun.go
+@@ -52,6 +52,54 @@ type netTun struct {
+ 
+ type Net netTun
+ 
++// SetTCPBufferSizes overrides selected TCP buffer range values. A zero value
++// keeps the gVisor default for that field.
++func (net *Net) SetTCPBufferSizes(sendMin, sendDefault, sendMax, receiveMin, receiveDefault, receiveMax int) error {
++	dev := (*netTun)(net)
++
++	var send tcpip.TCPSendBufferSizeRangeOption
++	if err := dev.stack.TransportProtocolOption(tcp.ProtocolNumber, &send); err != nil {
++		return fmt.Errorf("could not get TCP send buffer sizes: %v", err)
++	}
++	if sendMin > 0 {
++		send.Min = sendMin
++	}
++	if sendDefault > 0 {
++		send.Default = sendDefault
++	}
++	if sendMax > 0 {
++		send.Max = sendMax
++	}
++	if send.Min > send.Default || send.Default > send.Max {
++		return fmt.Errorf("invalid TCP send buffer range: min=%d default=%d max=%d", send.Min, send.Default, send.Max)
++	}
++
++	var receive tcpip.TCPReceiveBufferSizeRangeOption
++	if err := dev.stack.TransportProtocolOption(tcp.ProtocolNumber, &receive); err != nil {
++		return fmt.Errorf("could not get TCP receive buffer sizes: %v", err)
++	}
++	if receiveMin > 0 {
++		receive.Min = receiveMin
++	}
++	if receiveDefault > 0 {
++		receive.Default = receiveDefault
++	}
++	if receiveMax > 0 {
++		receive.Max = receiveMax
++	}
++	if receive.Min > receive.Default || receive.Default > receive.Max {
++		return fmt.Errorf("invalid TCP receive buffer range: min=%d default=%d max=%d", receive.Min, receive.Default, receive.Max)
++	}
++
++	if err := dev.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &send); err != nil {
++		return fmt.Errorf("could not set TCP send buffer sizes: %v", err)
++	}
++	if err := dev.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &receive); err != nil {
++		return fmt.Errorf("could not set TCP receive buffer sizes: %v", err)
++	}
++	return nil
++}
++
+ func CreateNetTUN(localAddresses, dnsServers []netip.Addr, mtu int) (tun.Device, *Net, error) {
+ 	opts := stack.Options{
+ 		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol},

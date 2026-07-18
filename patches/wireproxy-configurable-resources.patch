@@ -1,0 +1,317 @@
+diff --git a/config.go b/config.go
+index 04c516b..5236ee2 100644
+--- a/config.go
++++ b/config.go
+@@ -8,6 +8,7 @@ import (
+ 	"os"
+ 	"path/filepath"
+ 	"strings"
++	"time"
+ 
+ 	"github.com/go-ini/ini"
+ 
+@@ -24,14 +25,20 @@ type PeerConfig struct {
+ 
+ // DeviceConfig contains the information to initiate a wireguard connection
+ type DeviceConfig struct {
+-	SecretKey          string
+-	Endpoint           []netip.Addr
+-	Peers              []PeerConfig
+-	DNS                []netip.Addr
+-	MTU                int
+-	ListenPort         *int
+-	CheckAlive         []netip.Addr
+-	CheckAliveInterval int
++	SecretKey               string
++	Endpoint                []netip.Addr
++	Peers                   []PeerConfig
++	DNS                     []netip.Addr
++	MTU                     int
++	ListenPort              *int
++	CheckAlive              []netip.Addr
++	CheckAliveInterval      int
++	TCPReceiveBufferMin     int
++	TCPReceiveBufferDefault int
++	TCPReceiveBufferMax     int
++	TCPSendBufferMin        int
++	TCPSendBufferDefault    int
++	TCPSendBufferMax        int
+ }
+ 
+ type UDPProxyTunnelConfig struct {
+@@ -57,9 +64,12 @@ type TCPServerTunnelConfig struct {
+ }
+ 
+ type Socks5Config struct {
+-	BindAddress string
+-	Username    string
+-	Password    string
++	BindAddress    string
++	Username       string
++	Password       string
++	BufferSize     int
++	MaxConnections int
++	IdleTimeout    time.Duration
+ }
+ 
+ type SNIConfig struct {
+@@ -122,6 +132,21 @@ func parsePort(section *ini.Section, keyName string) (int, error) {
+ 	return port, nil
+ }
+ 
++func parseOptionalPositiveInt(section *ini.Section, keyName string) (int, error) {
++	key, err := section.GetKey(keyName)
++	if err != nil {
++		return 0, nil
++	}
++	value, err := key.Int()
++	if err != nil {
++		return 0, err
++	}
++	if value <= 0 {
++		return 0, errors.New(keyName + " should be greater than zero")
++	}
++	return value, nil
++}
++
+ func parseTCPAddr(section *ini.Section, keyName string) (*net.TCPAddr, error) {
+ 	addrStr, err := parseString(section, keyName)
+ 	if err != nil {
+@@ -316,6 +341,25 @@ func ParseInterface(cfg *ini.File, device *DeviceConfig) error {
+ 		device.CheckAliveInterval = value
+ 	}
+ 
++	bufferFields := []struct {
++		name string
++		dst  *int
++	}{
++		{"TCPReceiveBufferMin", &device.TCPReceiveBufferMin},
++		{"TCPReceiveBufferDefault", &device.TCPReceiveBufferDefault},
++		{"TCPReceiveBufferMax", &device.TCPReceiveBufferMax},
++		{"TCPSendBufferMin", &device.TCPSendBufferMin},
++		{"TCPSendBufferDefault", &device.TCPSendBufferDefault},
++		{"TCPSendBufferMax", &device.TCPSendBufferMax},
++	}
++	for _, field := range bufferFields {
++		value, err := parseOptionalPositiveInt(section, field.name)
++		if err != nil {
++			return err
++		}
++		*field.dst = value
++	}
++
+ 	return nil
+ }
+ 
+@@ -436,6 +480,21 @@ func parseSocks5Config(section *ini.Section) (RoutineSpawner, error) {
+ 	password, _ := parseString(section, "Password")
+ 	config.Password = password
+ 
++	config.BufferSize, err = parseOptionalPositiveInt(section, "BufferSize")
++	if err != nil {
++		return nil, err
++	}
++	config.MaxConnections, err = parseOptionalPositiveInt(section, "MaxConnections")
++	if err != nil {
++		return nil, err
++	}
++	if key, keyErr := section.GetKey("IdleTimeout"); keyErr == nil {
++		config.IdleTimeout, err = time.ParseDuration(key.String())
++		if err != nil || config.IdleTimeout <= 0 {
++			return nil, errors.New("IdleTimeout should be a positive Go duration such as 10m")
++		}
++	}
++
+ 	return config, nil
+ }
+ 
+@@ -480,7 +539,7 @@ func parseResolveConfig(section *ini.Section) (*ResolveConfig, error) {
+ 
+ 	resolvStrategy, _ := parseString(section, "ResolveStrategy")
+ 	config.ResolveStrategy = resolvStrategy
+-  
++
+ 	return config, nil
+ }
+ 
+@@ -616,9 +675,9 @@ func ParseConfig(path string) (*Configuration, error) {
+ 		resolve, err = parseResolveConfig(resolveSection)
+ 		if err != nil {
+ 			return nil, err
+-	  }
+-  }
+-    
++		}
++	}
++
+ 	err = parseRoutinesConfig(&routinesSpawners, cfg, "UDPProxyTunnel", parseUDPProxyTunnelConfig)
+ 	if err != nil {
+ 		return nil, err
+diff --git a/routine.go b/routine.go
+index 4f0d991..750ae71 100644
+--- a/routine.go
++++ b/routine.go
+@@ -155,6 +155,78 @@ func (d VirtualTun) resolveToAddrPort(endpoint *addressPort) (*netip.AddrPort, e
+ 	return &addrPort, nil
+ }
+ 
++type managedListener struct {
++	net.Listener
++	semaphore   chan struct{}
++	idleTimeout time.Duration
++}
++
++type managedConn struct {
++	net.Conn
++	idleTimeout time.Duration
++	release     func()
++	closeOnce   sync.Once
++}
++
++func (l *managedListener) Accept() (net.Conn, error) {
++	for {
++		conn, err := l.Listener.Accept()
++		if err != nil {
++			return nil, err
++		}
++
++		if l.semaphore != nil {
++			select {
++			case l.semaphore <- struct{}{}:
++			default:
++				_ = conn.Close()
++				continue
++			}
++		}
++
++		managed := &managedConn{Conn: conn, idleTimeout: l.idleTimeout}
++		if l.semaphore != nil {
++			managed.release = func() { <-l.semaphore }
++		}
++		managed.refreshDeadline()
++		return managed, nil
++	}
++}
++
++func (c *managedConn) refreshDeadline() {
++	if c.idleTimeout > 0 {
++		_ = c.Conn.SetDeadline(time.Now().Add(c.idleTimeout))
++	}
++}
++
++func (c *managedConn) Read(p []byte) (int, error) {
++	c.refreshDeadline()
++	n, err := c.Conn.Read(p)
++	if n > 0 {
++		c.refreshDeadline()
++	}
++	return n, err
++}
++
++func (c *managedConn) Write(p []byte) (int, error) {
++	c.refreshDeadline()
++	n, err := c.Conn.Write(p)
++	if n > 0 {
++		c.refreshDeadline()
++	}
++	return n, err
++}
++
++func (c *managedConn) Close() error {
++	err := c.Conn.Close()
++	c.closeOnce.Do(func() {
++		if c.release != nil {
++			c.release()
++		}
++	})
++	return err
++}
++
+ // SpawnRoutine spawns a socks5 server.
+ func (config *Socks5Config) SpawnRoutine(vt *VirtualTun) {
+ 	var authMethods []socks5.Authenticator
+@@ -166,16 +238,28 @@ func (config *Socks5Config) SpawnRoutine(vt *VirtualTun) {
+ 		authMethods = append(authMethods, socks5.NoAuthAuthenticator{})
+ 	}
+ 
++	bufferSize := config.BufferSize
++	if bufferSize == 0 {
++		bufferSize = 256 * 1024
++	}
+ 	options := []socks5.Option{
+ 		socks5.WithDial(vt.Tnet.DialContext),
+ 		socks5.WithResolver(vt),
+ 		socks5.WithAuthMethods(authMethods),
+-		socks5.WithBufferPool(bufferpool.NewPool(256 * 1024)),
++		socks5.WithBufferPool(bufferpool.NewPool(bufferSize)),
+ 	}
+ 
+ 	server := socks5.NewServer(options...)
++	listener, err := net.Listen("tcp", config.BindAddress)
++	if err != nil {
++		log.Fatal(err)
++	}
++	managed := &managedListener{Listener: listener, idleTimeout: config.IdleTimeout}
++	if config.MaxConnections > 0 {
++		managed.semaphore = make(chan struct{}, config.MaxConnections)
++	}
+ 
+-	if err := server.ListenAndServe("tcp", config.BindAddress); err != nil {
++	if err := server.Serve(managed); err != nil {
+ 		log.Fatal(err)
+ 	}
+ }
+diff --git a/wireguard.go b/wireguard.go
+index 3da5fa6..cdc02f0 100644
+--- a/wireguard.go
++++ b/wireguard.go
+@@ -15,10 +15,16 @@ import (
+ 
+ // DeviceSetting contains the parameters for setting up a tun interface
+ type DeviceSetting struct {
+-	IpcRequest string
+-	DNS        []netip.Addr
+-	DeviceAddr []netip.Addr
+-	MTU        int
++	IpcRequest              string
++	DNS                     []netip.Addr
++	DeviceAddr              []netip.Addr
++	MTU                     int
++	TCPReceiveBufferMin     int
++	TCPReceiveBufferDefault int
++	TCPReceiveBufferMax     int
++	TCPSendBufferMin        int
++	TCPSendBufferDefault    int
++	TCPSendBufferMax        int
+ }
+ 
+ // CreateIPCRequest serialize the config into an IPC request and DeviceSetting
+@@ -55,7 +61,12 @@ func CreateIPCRequest(conf *DeviceConfig) (*DeviceSetting, error) {
+ 		}
+ 	}
+ 
+-	setting := &DeviceSetting{IpcRequest: request.String(), DNS: conf.DNS, DeviceAddr: conf.Endpoint, MTU: conf.MTU}
++	setting := &DeviceSetting{
++		IpcRequest: request.String(), DNS: conf.DNS, DeviceAddr: conf.Endpoint, MTU: conf.MTU,
++		TCPReceiveBufferMin: conf.TCPReceiveBufferMin, TCPReceiveBufferDefault: conf.TCPReceiveBufferDefault,
++		TCPReceiveBufferMax: conf.TCPReceiveBufferMax, TCPSendBufferMin: conf.TCPSendBufferMin,
++		TCPSendBufferDefault: conf.TCPSendBufferDefault, TCPSendBufferMax: conf.TCPSendBufferMax,
++	}
+ 	return setting, nil
+ }
+ 
+@@ -71,6 +82,13 @@ func StartWireguard(conf *Configuration, logLevel int) (*VirtualTun, error) {
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	err = tnet.SetTCPBufferSizes(
++		setting.TCPSendBufferMin, setting.TCPSendBufferDefault, setting.TCPSendBufferMax,
++		setting.TCPReceiveBufferMin, setting.TCPReceiveBufferDefault, setting.TCPReceiveBufferMax,
++	)
++	if err != nil {
++		return nil, err
++	}
+ 	dev := device.NewDevice(tun, conn.NewDefaultBind(), device.NewLogger(logLevel, ""))
+ 	err = dev.IpcSet(setting.IpcRequest)
+ 	if err != nil {
+

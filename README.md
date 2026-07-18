@@ -13,6 +13,10 @@ runs WireGuard in userspace.
 - builder image: `golang:1.26-alpine`
 - runtime image: `alpine:3.22`
 
+The build applies two small, version-pinned patches to make the SOCKS copy
+buffer, userspace TCP buffers, connection limit, and idle timeout configurable.
+Leaving the new settings empty preserves upstream defaults.
+
 ## Quick Start
 
 ```bash
@@ -88,6 +92,73 @@ WG_ENDPOINT=162.159.192.1:2408
 This endpoint was tested successfully on the HK server where the default
 `engage.cloudflareclient.com:2408` endpoint timed out.
 
+## Resource Profiles
+
+The default profile preserves upstream wireproxy and Go runtime behavior:
+
+```dotenv
+MEMORY_PROFILE=default
+```
+
+For a small server, enable:
+
+```dotenv
+MEMORY_PROFILE=low
+```
+
+The built-in profiles are:
+
+| Setting | `default` | `low` | `balanced` |
+| --- | ---: | ---: | ---: |
+| SOCKS buffer, each direction | 256 KiB | 64 KiB | 128 KiB |
+| TCP receive/send default | 1 MiB | 512 KiB | 1 MiB |
+| TCP receive/send maximum | 4 MiB | 2 MiB | 4 MiB |
+| `GOMEMLIMIT` | unset | 96 MiB | 160 MiB |
+| Maximum SOCKS connections | unlimited | 64 | 256 |
+| Idle timeout | unset | 10 minutes | 15 minutes |
+
+All values can be overridden individually in `.env`. Buffer sizes are bytes:
+
+```dotenv
+SOCKS_BUFFER_SIZE=65536
+TCP_RECV_BUFFER_MIN=4096
+TCP_RECV_BUFFER_DEFAULT=524288
+TCP_RECV_BUFFER_MAX=2097152
+TCP_SEND_BUFFER_MIN=4096
+TCP_SEND_BUFFER_DEFAULT=524288
+TCP_SEND_BUFFER_MAX=2097152
+GOMEMLIMIT=96MiB
+GOGC=75
+MAX_CONNECTIONS=64
+IDLE_TIMEOUT=10m
+```
+
+In a four-connection, 80 MB download test on the HK server, the `low` profile
+settled at about 57 MiB versus about 107 MiB for `default`, without a measurable
+throughput loss. This is one test, not a universal benchmark.
+
+## DNS and Health
+
+For `socks5h` requests, leave `WG_DNS` empty to retain the DNS servers generated
+by wgcf, or override them explicitly:
+
+```dotenv
+WG_DNS=1.1.1.1,1.0.0.1
+RESOLVE_STRATEGY=auto
+```
+
+The container health check uses wireproxy's `/readyz` endpoint and sends an ICMP
+probe through WARP. It is enabled by default:
+
+```dotenv
+CHECK_ALIVE=1.1.1.1
+CHECK_ALIVE_INTERVAL=15
+```
+
+Set `CHECK_ALIVE=` to disable the tunnel probe. Docker reports an unhealthy
+container but does not restart it solely because of health status; the
+`restart: unless-stopped` policy still handles process or container exits.
+
 ## LAN Access
 
 To expose the proxy beyond localhost, use:
@@ -105,5 +176,8 @@ SOCKS5 proxy to the public internet.
 
 - WARP does not let you choose the exit country.
 - wireproxy SOCKS5 does not support UDP Associate.
-- This setup optimizes for low memory and simple deployment, not maximum raw
-  throughput.
+- HTTP/2 connection reuse is handled by the client. wireproxy shares one WARP
+  peer across all SOCKS connections but does not pool unrelated target TCP
+  connections.
+- Smaller buffers reduce memory and read-ahead traffic but may reduce throughput
+  on high-latency paths. Start with a profile before using fine-grained values.

@@ -8,15 +8,36 @@ services:
     environment:
       WG_MTU: "${WG_MTU:-1280}"
       WG_ENDPOINT: "${WG_ENDPOINT:-}"
+      WG_DNS: "${WG_DNS:-}"
+      RESOLVE_STRATEGY: "${RESOLVE_STRATEGY:-auto}"
+      CHECK_ALIVE: "${CHECK_ALIVE:-1.1.1.1}"
+      CHECK_ALIVE_INTERVAL: "${CHECK_ALIVE_INTERVAL:-15}"
       SOCKS_USERNAME: "${SOCKS_USERNAME:-}"
       SOCKS_PASSWORD: "${SOCKS_PASSWORD:-}"
+      MEMORY_PROFILE: "${MEMORY_PROFILE:-default}"
+      SOCKS_BUFFER_SIZE: "${SOCKS_BUFFER_SIZE:-}"
+      TCP_RECV_BUFFER_MIN: "${TCP_RECV_BUFFER_MIN:-}"
+      TCP_RECV_BUFFER_DEFAULT: "${TCP_RECV_BUFFER_DEFAULT:-}"
+      TCP_RECV_BUFFER_MAX: "${TCP_RECV_BUFFER_MAX:-}"
+      TCP_SEND_BUFFER_MIN: "${TCP_SEND_BUFFER_MIN:-}"
+      TCP_SEND_BUFFER_DEFAULT: "${TCP_SEND_BUFFER_DEFAULT:-}"
+      TCP_SEND_BUFFER_MAX: "${TCP_SEND_BUFFER_MAX:-}"
+      GOMEMLIMIT: "${GOMEMLIMIT:-}"
+      GOGC: "${GOGC:-}"
+      MAX_CONNECTIONS: "${MAX_CONNECTIONS:-}"
+      IDLE_TIMEOUT: "${IDLE_TIMEOUT:-}"
     volumes:
       - ./data:/data
     healthcheck:
-      test: ["CMD-SHELL", "nc -z 127.0.0.1 1080"]
+      test: ["CMD-SHELL", "curl --fail --silent --max-time 10 http://127.0.0.1:9080/readyz >/dev/null"]
       interval: 30s
       timeout: 12s
       retries: 3
-      start_period: 30s
+      start_period: 45s
+    read_only: true
+    tmpfs:
+      - /tmp:size=8m,noexec,nosuid,nodev
+    cap_drop:
+      - ALL
     security_opt:
       - no-new-privileges:true
