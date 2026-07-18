@@ -106,6 +106,12 @@ For a small server, enable:
 MEMORY_PROFILE=low
 ```
 
+Or use the included Compose override without editing `.env`:
+
+```bash
+docker compose -f compose.yaml -f compose.low-memory.yaml up -d
+```
+
 The built-in profiles are:
 
 | Setting | `default` | `low` | `balanced` |
