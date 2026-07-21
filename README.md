@@ -153,6 +153,19 @@ WG_DNS=1.1.1.1,1.0.0.1
 RESOLVE_STRATEGY=auto
 ```
 
+To reduce repeated `socks5h` lookups, enable the bounded in-process DNS cache:
+
+```dotenv
+DNS_CACHE_TTL=60s
+DNS_CACHE_NEGATIVE_TTL=10s
+DNS_CACHE_MAX_ENTRIES=1024
+```
+
+The cache uses a fixed TTL because wireproxy's resolver does not expose DNS
+record TTLs. It keeps at most the configured number of hostname entries and
+coalesces concurrent requests for one hostname into one upstream query. Leave
+`DNS_CACHE_TTL` empty to disable it.
+
 The container health check uses wireproxy's `/readyz` endpoint and sends an ICMP
 probe through WARP. It is enabled by default:
 
@@ -164,6 +177,43 @@ CHECK_ALIVE_INTERVAL=15
 Set `CHECK_ALIVE=` to disable the tunnel probe. Docker reports an unhealthy
 container but does not restart it solely because of health status; the
 `restart: unless-stopped` policy still handles process or container exits.
+
+## Logs and Recovery
+
+The Compose service rotates Docker JSON logs by size, not by calendar date:
+5 MiB per file, at most 7 files, and compressed rotated files. This caps the
+uncompressed retention at roughly 35 MiB. Change the `logging` section in
+`compose.yaml` if you need a different capacity. The settings take effect when
+the container is recreated with `docker compose up -d`.
+
+Use `LOG_LEVEL=error` to retain `ERROR` messages while suppressing routine
+request logs and WireGuard DEBUG logs. Use `LOG_LEVEL=debug` for temporary
+diagnosis; it can generate a large number of DNS, health-check, and keepalive
+lines.
+
+The `watchdog/` directory contains an optional host-side systemd timer. It
+checks Docker's health status every 30 seconds and restarts the container only
+after the WARP probe is `unhealthy`. It has a 90-second restart cooldown and a
+three-restarts-per-hour circuit breaker. It is intentionally not a container:
+mounting `/var/run/docker.sock` into a helper container would grant it broad
+control of the Docker host.
+
+Install it on an Ubuntu host after reviewing the paths:
+
+```bash
+sudo install -m 0755 watchdog/wireproxy-watchdog.sh /usr/local/sbin/wireproxy-watchdog
+sudo install -m 0644 watchdog/wireproxy-watchdog.service /etc/systemd/system/
+sudo install -m 0644 watchdog/wireproxy-watchdog.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now wireproxy-watchdog.timer
+```
+
+Check it with:
+
+```bash
+systemctl list-timers wireproxy-watchdog.timer
+journalctl -u wireproxy-watchdog.service
+```
 
 ## LAN Access
 

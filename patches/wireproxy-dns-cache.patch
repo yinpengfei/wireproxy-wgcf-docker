@@ -1,0 +1,153 @@
+diff --git a/dns_cache.go b/dns_cache.go
+new file mode 100644
+index 0000000..a73f6d5
+--- /dev/null
++++ b/dns_cache.go
+@@ -0,0 +1,110 @@
++package wireproxy
++
++import (
++	"context"
++	"errors"
++	"os"
++	"strconv"
++	"sync"
++	"time"
++)
++
++type dnsCacheEntry struct {
++	addrs   []string
++	err     error
++	expires time.Time
++}
++
++type dnsCache struct {
++	mu          sync.Mutex
++	entries     map[string]dnsCacheEntry
++	inflight    map[string]chan struct{}
++	ttl         time.Duration
++	negativeTTL time.Duration
++	maxEntries  int
++}
++
++func newDNSCacheFromEnv() *dnsCache {
++	ttl, err := time.ParseDuration(os.Getenv("DNS_CACHE_TTL"))
++	if err != nil || ttl <= 0 {
++		return nil
++	}
++
++	negativeTTL := 10 * time.Second
++	if raw := os.Getenv("DNS_CACHE_NEGATIVE_TTL"); raw != "" {
++		if value, parseErr := time.ParseDuration(raw); parseErr == nil && value > 0 {
++			negativeTTL = value
++		}
++	}
++
++	maxEntries := 1024
++	if raw := os.Getenv("DNS_CACHE_MAX_ENTRIES"); raw != "" {
++		if value, parseErr := strconv.Atoi(raw); parseErr == nil && value > 0 {
++			maxEntries = value
++		}
++	}
++
++	return &dnsCache{
++		entries:     make(map[string]dnsCacheEntry),
++		inflight:    make(map[string]chan struct{}),
++		ttl:         ttl,
++		negativeTTL: negativeTTL,
++		maxEntries:  maxEntries,
++	}
++}
++
++func (c *dnsCache) lookup(ctx context.Context, name string, resolve func(context.Context, string) ([]string, error)) ([]string, error) {
++	for {
++		now := time.Now()
++		c.mu.Lock()
++		if entry, ok := c.entries[name]; ok {
++			if now.Before(entry.expires) {
++				addrs := append([]string(nil), entry.addrs...)
++				c.mu.Unlock()
++				return addrs, entry.err
++			}
++			delete(c.entries, name)
++		}
++		if done, ok := c.inflight[name]; ok {
++			c.mu.Unlock()
++			select {
++			case <-done:
++				continue
++			case <-ctx.Done():
++				return nil, ctx.Err()
++			}
++		}
++		done := make(chan struct{})
++		c.inflight[name] = done
++		c.mu.Unlock()
++
++		addrs, err := resolve(ctx, name)
++		if err == nil && len(addrs) == 0 {
++			err = errors.New("no address found for: " + name)
++		}
++		ttl := c.ttl
++		if err != nil {
++			ttl = c.negativeTTL
++		}
++
++		c.mu.Lock()
++		if len(c.entries) >= c.maxEntries {
++			for key, entry := range c.entries {
++				if !now.Before(entry.expires) {
++					delete(c.entries, key)
++				}
++			}
++			if len(c.entries) >= c.maxEntries {
++				for key := range c.entries {
++					delete(c.entries, key)
++					break
++				}
++			}
++		}
++		c.entries[name] = dnsCacheEntry{addrs: append([]string(nil), addrs...), err: err, expires: now.Add(ttl)}
++		delete(c.inflight, name)
++		close(done)
++		c.mu.Unlock()
++		return addrs, err
++	}
++}
+diff --git a/routine.go b/routine.go
+index 5236ee2..bd3cd7c 100644
+--- a/routine.go
++++ b/routine.go
+@@ -52,4 +52,5 @@ type VirtualTun struct {
+ 	// PingRecord stores the last time an IP was pinged
+ 	PingRecord     map[string]uint64
+ 	PingRecordLock *sync.Mutex
++	DNSCache       *dnsCache
+ }
+@@ -67,6 +68,15 @@ type addressPort struct {
+ // LookupAddr lookups a hostname.
+ // DNS traffic may or may not be routed depending on VirtualTun's setting
+ func (d VirtualTun) LookupAddr(ctx context.Context, name string) ([]string, error) {
++	resolve := func(ctx context.Context, name string) ([]string, error) {
++		if d.SystemDNS {
++			return net.DefaultResolver.LookupHost(ctx, name)
++		}
++		return d.Tnet.LookupContextHost(ctx, name)
++	}
++	if d.DNSCache != nil {
++		return d.DNSCache.lookup(ctx, name, resolve)
++	}
+ 	if d.SystemDNS {
+ 		return net.DefaultResolver.LookupHost(ctx, name)
+ 	}
+diff --git a/wireguard.go b/wireguard.go
+index cdc02f0..df1e4f3 100644
+--- a/wireguard.go
++++ b/wireguard.go
+@@ -121,5 +121,6 @@ func StartWireguard(conf *Configuration, logLevel int) (*VirtualTun, error) {
+ 		SystemDNS:      len(setting.DNS) == 0,
+ 		PingRecord:     make(map[string]uint64),
+ 		PingRecordLock: new(sync.Mutex),
++		DNSCache:       newDNSCacheFromEnv(),
+ 	}, nil
+ }

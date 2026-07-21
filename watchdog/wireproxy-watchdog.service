@@ -1,0 +1,11 @@
+[Unit]
+Description=Recover wireproxy-wgcf after failed WARP health probes
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+Environment=CONTAINER=wireproxy-wgcf
+Environment=COOLDOWN_SECONDS=90
+Environment=MAX_RESTARTS_PER_HOUR=3
+ExecStart=/usr/local/sbin/wireproxy-watchdog

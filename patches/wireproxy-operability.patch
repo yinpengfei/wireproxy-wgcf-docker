@@ -1,0 +1,23 @@
+diff --git a/cmd/wireproxy/main.go b/cmd/wireproxy/main.go
+index 77d1867..9acf267 100644
+--- a/cmd/wireproxy/main.go
++++ b/cmd/wireproxy/main.go
+@@ -3,6 +3,7 @@ package main
+ import (
+ 	"context"
+ 	"fmt"
++	"io"
+ 	"log"
+ 	"net"
+ 	"net/http"
+@@ -273,6 +274,10 @@ func main() {
+ 	// so redirect STDOUT to STDERR, we don't want to print anything to STDOUT anyways
+ 	os.Stdout = os.Stderr
+ 	logLevel := device.LogLevelVerbose
++	if os.Getenv("LOG_LEVEL") == "error" {
++		log.SetOutput(io.Discard)
++		logLevel = device.LogLevelSilent
++	}
+ 	if *silent {
+ 		logLevel = device.LogLevelSilent
+ 	}

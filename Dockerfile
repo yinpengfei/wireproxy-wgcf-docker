@@ -10,6 +10,8 @@ RUN git clone --depth 1 --branch "${WIREPROXY_VERSION}" \
         https://github.com/windtf/wireproxy.git /src/wireproxy \
     && cd /src/wireproxy \
     && git apply /patches/wireproxy-configurable-resources.patch \
+    && git apply /patches/wireproxy-operability.patch \
+    && git apply /patches/wireproxy-dns-cache.patch \
     && go mod download \
     && WIREGUARD_DIR="$(go list -m -f '{{.Dir}}' golang.zx2c4.com/wireguard)" \
     && chmod u+w "${WIREGUARD_DIR}/tun/netstack/tun.go" \

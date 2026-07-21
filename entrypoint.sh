@@ -139,6 +139,11 @@ else
     unset GOGC
 fi
 
+case "${LOG_LEVEL:-debug}" in
+    debug|error) export LOG_LEVEL="${LOG_LEVEL:-debug}" ;;
+    *) echo "LOG_LEVEL must be debug or error" >&2; exit 1 ;;
+esac
+
 case "${SOCKS_USERNAME:-}${SOCKS_PASSWORD:-}" in
     *"
 "*) echo "SOCKS_USERNAME and SOCKS_PASSWORD must not contain newlines" >&2; exit 1 ;;
@@ -181,5 +186,5 @@ esac
 
 chmod 600 "$ACCOUNT" "$PROFILE" "$CONFIG"
 
-echo "Starting wireproxy on container port 1080, MTU=$MTU_VALUE, memory-profile=${MEMORY_PROFILE:-default}"
+echo "Starting wireproxy on container port 1080, MTU=$MTU_VALUE, memory-profile=${MEMORY_PROFILE:-default}, log-level=$LOG_LEVEL"
 exec wireproxy -c "$CONFIG" -i 127.0.0.1:9080

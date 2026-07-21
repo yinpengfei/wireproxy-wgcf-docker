@@ -10,8 +10,12 @@ services:
       WG_ENDPOINT: "${WG_ENDPOINT:-}"
       WG_DNS: "${WG_DNS:-}"
       RESOLVE_STRATEGY: "${RESOLVE_STRATEGY:-auto}"
+      DNS_CACHE_TTL: "${DNS_CACHE_TTL:-}"
+      DNS_CACHE_NEGATIVE_TTL: "${DNS_CACHE_NEGATIVE_TTL:-10s}"
+      DNS_CACHE_MAX_ENTRIES: "${DNS_CACHE_MAX_ENTRIES:-1024}"
       CHECK_ALIVE: "${CHECK_ALIVE:-1.1.1.1}"
       CHECK_ALIVE_INTERVAL: "${CHECK_ALIVE_INTERVAL:-15}"
+      LOG_LEVEL: "${LOG_LEVEL:-debug}"
       SOCKS_USERNAME: "${SOCKS_USERNAME:-}"
       SOCKS_PASSWORD: "${SOCKS_PASSWORD:-}"
       MEMORY_PROFILE: "${MEMORY_PROFILE:-default}"
@@ -34,6 +38,14 @@ services:
       timeout: 12s
       retries: 3
       start_period: 45s
+    # Rotate by size (not by calendar day). Keeps at most about 35 MiB before
+    # compression, so DEBUG traffic cannot fill a small VPS disk.
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "7"
+        compress: "true"
     read_only: true
     tmpfs:
       - /tmp:size=8m,noexec,nosuid,nodev
